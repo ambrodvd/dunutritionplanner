@@ -18,7 +18,7 @@ import os
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Nutri & Drink Calculator", page_icon="🥤", layout="wide")
+st.set_page_config(page_title="DU Nutri & Drink Calculator", page_icon="🥤", layout="wide")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 INVENTARIO_PATH = os.path.join(APP_DIR, "inventario.csv")
@@ -56,9 +56,9 @@ def load_inventario_rows() -> list:
     return rows
 
 
-def save_inventario_rows(rows: list) -> None:
+def rows_to_df(rows: list) -> pd.DataFrame:
     clean = [r for r in rows if str(r.get("PRODOTTO", "")).strip() != ""]
-    df = pd.DataFrame(
+    return pd.DataFrame(
         [
             {
                 "PRODOTTO": r["PRODOTTO"].strip(),
@@ -71,7 +71,29 @@ def save_inventario_rows(rows: list) -> None:
         ],
         columns=INVENTARIO_COLS,
     )
-    df.to_csv(INVENTARIO_PATH, index=False)
+
+
+def save_inventario_rows(rows: list) -> None:
+    rows_to_df(rows).to_csv(INVENTARIO_PATH, index=False)
+
+
+def df_to_rows(df: pd.DataFrame) -> list:
+    rows = []
+    for col in INVENTARIO_COLS:
+        if col not in df.columns:
+            df[col] = "" if col in ("PRODOTTO", "MARCA") else 0.0
+    for i, r in df.iterrows():
+        rows.append(
+            {
+                "id": i,
+                "PRODOTTO": "" if pd.isna(r["PRODOTTO"]) else str(r["PRODOTTO"]),
+                "MARCA": "" if pd.isna(r["MARCA"]) else str(r["MARCA"]),
+                "g CARBO": float(r["g CARBO"]) if pd.notna(r["g CARBO"]) else 0.0,
+                "SODIO [mg]": float(r["SODIO [mg]"]) if pd.notna(r["SODIO [mg]"]) else 0.0,
+                "CALORIE [kcal]": float(r["CALORIE [kcal]"]) if pd.notna(r["CALORIE [kcal]"]) else 0.0,
+            }
+        )
+    return rows
 
 
 def next_id(rows: list) -> int:
@@ -121,7 +143,7 @@ st.markdown(
         color:#3d2b00;
     ">
         Questa app è stata creata da <strong>Ultranerd</strong> per <strong>Destination Unknown</strong>.
-        L'app è gratuita, ma se vuoi 
+        L'app è gratuita, ma se vuoi
         <a href="https://buymeacoffee.com/ultranerd" target="_blank" style="color:#3d2b00; font-weight:700; text-decoration:underline;">
             puoi cliccare qui e offrirmi un caffè
         </a>
@@ -130,8 +152,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
-tab_inv, tab_race = st.tabs(["📦 Inventario", "🏃 Calcolo Corsa"])
+tab_inv, tab_race = st.tabs(["📦 Inventario", "🏃 Calcoli"])
 
 # ---------------------------------------------------------------- Inventario
 with tab_inv:
@@ -188,19 +209,61 @@ with tab_inv:
                 st.rerun()
 
     st.divider()
-    col_a, col_b = st.columns([1, 5])
-    with col_a:
-        if st.button("💾 Salva inventario", type="primary"):
-            save_inventario_rows(st.session_state.inventario_rows)
-            st.success("Inventario salvato.")
-    with col_b:
-        if st.button("↩️ Ripristina da file"):
-            st.session_state.inventario_rows = load_inventario_rows()
-            st.rerun()
+    with st.container(border=True):
+        st.markdown("**💾 Salva / ripristina**")
+        col_a, col_b = st.columns(2, gap="large")
+        with col_a:
+            st.caption("Salva le modifiche fatte sopra su inventario.csv.")
+            if st.button("Salva inventario", type="primary", use_container_width=True):
+                save_inventario_rows(st.session_state.inventario_rows)
+                st.success("Inventario salvato.")
+        with col_b:
+            st.caption("Annulla le modifiche non salvate e ricarica da inventario.csv.")
+            if st.button("Ripristina da file", use_container_width=True):
+                st.session_state.inventario_rows = load_inventario_rows()
+                st.rerun()
+
+    st.divider()
+    with st.container(border=True):
+        st.markdown("**⇅ Esporta / importa inventario**")
+        col_dl, col_up = st.columns(2, gap="large")
+
+        with col_dl:
+            st.caption("Scarica l'inventario attuale")
+            csv_bytes = rows_to_df(st.session_state.inventario_rows).to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Scarica CSV",
+                data=csv_bytes,
+                file_name="inventario_du_nutridrinkcalculator.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with col_up:
+            st.caption("Carica un inventario precedentemente scaricato")
+            uploaded_csv = st.file_uploader(
+                "Carica CSV",
+                type=["csv"],
+                key="inventario_uploader",
+                label_visibility="collapsed",
+            )
+            if uploaded_csv is not None:
+                try:
+                    uploaded_df = pd.read_csv(uploaded_csv)
+                    if "PRODOTTO" not in uploaded_df.columns:
+                        st.error("Il CSV non contiene la colonna 'PRODOTTO'. Verifica il file e riprova.")
+                    else:
+                        if st.button("Sostituisci inventario", type="primary", use_container_width=True):
+                            st.session_state.inventario_rows = df_to_rows(uploaded_df)
+                            save_inventario_rows(st.session_state.inventario_rows)
+                            st.success("Inventario importato e salvato.")
+                            st.rerun()
+                except Exception as e:
+                    st.error(f"Errore nella lettura del CSV: {e}")
 
 # ---------------------------------------------------------------- Calcolo Corsa
 with tab_race:
-    st.subheader("Calcolo Corsa")
+    st.subheader("Calcoli")
 
     inv_df = pd.DataFrame(
         [r for r in st.session_state.inventario_rows if str(r["PRODOTTO"]).strip() != ""]
