@@ -184,6 +184,130 @@ def hourly_buckets(total_minutes: int) -> list:
 
 
 # ----------------------------------------------------------------------------
+# Esporta / importa l'intero piano (piano gara + obiettivi + prodotti gara) in un
+# unico CSV. Lo schema è "a righe eterogenee": la colonna TIPO indica cosa
+# rappresenta la riga (SETTINGS/SEZIONE/TARGET/PRODOTTO), le colonne campo1..campo7
+# ne contengono i dati — così un solo file CSV può portare tutto lo stato.
+# ----------------------------------------------------------------------------
+PIANO_CSV_COLS = ["TIPO", "campo1", "campo2", "campo3", "campo4", "campo5", "campo6", "campo7"]
+
+
+def export_piano_csv() -> bytes:
+    rows = []
+    rows.append(
+        {
+            "TIPO": "SETTINGS",
+            "campo1": int(st.session_state.plan_enabled),
+            "campo2": st.session_state.plan_total_time,
+            "campo3": st.session_state.race_hours,
+            "campo4": int(st.session_state.time_dist_enabled),
+            "campo5": "",
+            "campo6": "",
+            "campo7": "",
+        }
+    )
+    for s in st.session_state.plan_sections:
+        rows.append(
+            {
+                "TIPO": "SEZIONE",
+                "campo1": s["id"],
+                "campo2": s["nome"],
+                "campo3": s["durata"],
+                "campo4": s.get("note", ""),
+                "campo5": "",
+                "campo6": "",
+                "campo7": "",
+            }
+        )
+    for scope in ("min", "max"):
+        for k, v in st.session_state.targets[scope].items():
+            rows.append(
+                {
+                    "TIPO": "TARGET",
+                    "campo1": scope,
+                    "campo2": k,
+                    "campo3": v,
+                    "campo4": "",
+                    "campo5": "",
+                    "campo6": "",
+                    "campo7": "",
+                }
+            )
+    for r in st.session_state.race_rows:
+        rows.append(
+            {
+                "TIPO": "PRODOTTO",
+                "campo1": r["id"],
+                "campo2": r["PRODOTTO"] or "",
+                "campo3": r["n"],
+                "campo4": r["LIQUIDO [ml/unita]"],
+                "campo5": r["note"],
+                "campo6": r.get("SEZIONE") or "",
+                "campo7": r.get("ORARIO", 0),
+            }
+        )
+    df = pd.DataFrame(rows, columns=PIANO_CSV_COLS)
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def import_piano_csv(uploaded_file) -> None:
+    df = pd.read_csv(uploaded_file, dtype=str).fillna("")
+    for col in PIANO_CSV_COLS:
+        if col not in df.columns:
+            df[col] = ""
+
+    settings_rows = df[df["TIPO"] == "SETTINGS"]
+    if not settings_rows.empty:
+        s = settings_rows.iloc[0]
+        st.session_state.plan_enabled = bool(int(s["campo1"])) if s["campo1"] != "" else False
+        st.session_state.plan_total_time = int(float(s["campo2"])) if s["campo2"] != "" else 4 * 60
+        st.session_state.race_hours = float(s["campo3"]) if s["campo3"] != "" else 4.0
+        st.session_state.time_dist_enabled = bool(int(s["campo4"])) if s["campo4"] != "" else False
+
+    sections = []
+    next_sec_id = 0
+    for _, r in df[df["TIPO"] == "SEZIONE"].iterrows():
+        sid = int(float(r["campo1"]))
+        sections.append(
+            {"id": sid, "nome": r["campo2"], "durata": int(float(r["campo3"])), "note": r["campo4"]}
+        )
+        next_sec_id = max(next_sec_id, sid + 1)
+    st.session_state.plan_sections = sections
+    st.session_state.plan_next_id = next_sec_id
+
+    targets = {"min": dict(DEFAULT_TARGETS["min"]), "max": dict(DEFAULT_TARGETS["max"])}
+    for _, r in df[df["TIPO"] == "TARGET"].iterrows():
+        scope, key, val = r["campo1"], r["campo2"], r["campo3"]
+        if scope in targets and key in targets[scope] and val != "":
+            targets[scope][key] = float(val)
+    st.session_state.targets = targets
+
+    race_rows = []
+    next_race_id = 0
+    for _, r in df[df["TIPO"] == "PRODOTTO"].iterrows():
+        rid = int(float(r["campo1"]))
+        race_rows.append(
+            {
+                "id": rid,
+                "PRODOTTO": r["campo2"] if r["campo2"] != "" else None,
+                "n": float(r["campo3"]) if r["campo3"] != "" else 1.0,
+                "LIQUIDO [ml/unita]": float(r["campo4"]) if r["campo4"] != "" else 0.0,
+                "note": r["campo5"],
+                "SEZIONE": r["campo6"] if r["campo6"] != "" else None,
+                "ORARIO": int(float(r["campo7"])) if r["campo7"] != "" else 0,
+            }
+        )
+        next_race_id = max(next_race_id, rid + 1)
+    if not race_rows:
+        race_rows = [
+            {"id": 0, "PRODOTTO": None, "n": 1.0, "LIQUIDO [ml/unita]": 0.0, "note": "", "SEZIONE": None, "ORARIO": 0}
+        ]
+        next_race_id = 1
+    st.session_state.race_rows = race_rows
+    st.session_state.race_next_id = next_race_id
+
+
+# ----------------------------------------------------------------------------
 # Session state init
 # ----------------------------------------------------------------------------
 if "inventario_rows" not in st.session_state:
@@ -226,19 +350,18 @@ if "plan_sections" not in st.session_state:
 # ----------------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------------
-logo_path = os.path.join(APP_DIR, "assets", "logo_tondo_du.jpg")
-wordmark_path = os.path.join(APP_DIR, "assets", "SCRITTA_ULTRANERD.png")
+logo_path = os.path.join(APP_DIR, "logo_tondo_du.jpg")
+wordmark_path = os.path.join(APP_DIR, "SCRITTA_ULTRANERD.png")
 
-header_logo, header_word = st.columns([1, 4])
+header_logo, header_title, header_word = st.columns([0.9, 4, 1.6], vertical_alignment="center")
 with header_logo:
     if os.path.exists(logo_path):
-        st.image(logo_path, width=90)
+        st.image(logo_path, width=70)
+with header_title:
+    st.title("🥤 DU Nutri & Drink Calculator")
 with header_word:
     if os.path.exists(wordmark_path):
-        st.image(wordmark_path, width=260)
-
-st.title("🥤 DU Nutri & Drink Calculator")
-st.caption("Basato su NUTRI AND DRINK CALCULATOR v3.0 — tab Inventario, Piano gara e Calcoli")
+        st.image(wordmark_path, width=170)
 st.markdown(
     """
     <div style="
@@ -259,8 +382,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_inv, tab_targets, tab_plan, tab_race = st.tabs(
-    ["📦 Inventario", "🎯 Obiettivi", "🗺️ Piano gara", "🏃 Calcoli"]
+tab_inv, tab_targets, tab_plan, tab_race, tab_export = st.tabs(
+    ["📦 Inventario", "🎯 Obiettivi", "🗺️ Piano gara", "🏃 Calcoli", "💾 Esporta/Importa piano"]
 )
 
 # ---------------------------------------------------------------- Inventario
@@ -374,8 +497,7 @@ with tab_inv:
 with tab_targets:
     st.subheader("Obiettivi (min / max)")
     st.caption(
-        "Range orario consigliato per liquido, carboidrati, sodio e calorie: usato per i confronti "
-        "nel tab Calcoli (totali, per sezione e distribuzione oraria)."
+        "Range orario consigliato per liquidi, carboidrati, sodio e calorie"
     )
     tcols = st.columns(4)
     for i, key in enumerate(TARGET_LABELS):
@@ -463,8 +585,7 @@ with tab_plan:
         elif assigned_min == total_min and total_min > 0:
             st.success(
                 f"Piano completo: le sezioni coprono {minutes_to_hhmm(assigned_min)} su "
-                f"{minutes_to_hhmm(total_min)} totali. ✅ Ora puoi assegnare una sezione a ogni "
-                f"prodotto nel tab Calcoli."
+                f"{minutes_to_hhmm(total_min)} totali. ✅ Procedi nella scheda Calcoli."
             )
         elif assigned_min < total_min:
             st.warning(
@@ -515,13 +636,25 @@ with tab_race:
     if not item_options:
         st.warning("L'inventario è vuoto: aggiungi almeno un prodotto nella tab Inventario.")
     else:
-        if plan_active:
+        if st.session_state.plan_enabled:
+            # Piano gara is the single source of truth for race duration once it's turned on —
+            # no separate "Ore corsa" box here, to avoid two conflicting ways to set it.
             hours = st.session_state.plan_total_time / 60.0
-            st.info(
-                f"🗺️ Piano gara attivo: {len(section_names)} sezioni, durata totale "
-                f"{minutes_to_hhmm(st.session_state.plan_total_time)}. La durata gara "
-                f"è presa dal Piano gara."
-            )
+            if plan_active:
+                st.info(
+                    f"🗺️ Piano gara attivo: {len(section_names)} sezioni, durata totale "
+                    f"{minutes_to_hhmm(st.session_state.plan_total_time)}."
+                )
+            else:
+                st.info(
+                    f"🗺️ Durata gara presa dal Piano gara: "
+                    f"{minutes_to_hhmm(st.session_state.plan_total_time)}."
+                )
+                st.caption(
+                    "Il piano gara non è ancora completo (le sezioni non coprono l'intero tempo "
+                    "totale): completalo nel tab 'Piano gara' per attivare anche i calcoli per "
+                    "sezione. La durata totale della gara viene comunque presa da lì."
+                )
         else:
             race_total_min = hhmm_input(
                 "⏱️ Ore corsa (durata gara)",
@@ -530,11 +663,6 @@ with tab_race:
             )
             st.session_state.race_hours = race_total_min / 60.0
             hours = st.session_state.race_hours
-            if st.session_state.plan_enabled:
-                st.caption(
-                    "Il piano gara non è ancora completo (le sezioni non coprono l'intero tempo "
-                    "totale): completalo nel tab 'Piano gara' per attivare i calcoli per sezione."
-                )
 
         time_dist = st.session_state.time_dist_enabled
         plan_bounds_by_name = {b["nome"]: b for b in plan_bounds} if plan_active else {}
@@ -568,6 +696,15 @@ with tab_race:
                 current_prodotto = row["PRODOTTO"] if row["PRODOTTO"] in item_options else None
                 idx = item_options.index(current_prodotto) if current_prodotto in item_options else 0
                 row["PRODOTTO"] = c1.selectbox("PRODOTTO", options=item_options, index=idx, key=f"race_prodotto_{rid}")
+
+                if row["PRODOTTO"] in inv_lookup.index:
+                    info = inv_lookup.loc[row["PRODOTTO"]]
+                    if isinstance(info, pd.DataFrame):
+                        info = info.iloc[0]
+                    c1.caption(
+                        f"🍬 Carbo {info['g CARBO']:.1f} g · 🧂 Sodio {info['SODIO [mg]']:.0f} mg · "
+                        f"🔥 Calorie {info['CALORIE [kcal]']:.0f} kcal"
+                    )
 
                 row["n"] = c2.number_input(
                     "n (quantità)", value=float(row["n"]), min_value=0.0, step=1.0, format="%.2f", key=f"race_n_{rid}"
@@ -613,12 +750,12 @@ with tab_race:
             used for the section/overall calcoli so many of them fit compactly."""
             color_style = f"color:{value_color};" if value_color else ""
             sub_html = (
-                f'<div style="font-size:0.68rem;color:#8a8a8a;margin-top:1px;">{sub}</div>' if sub else ""
+                f'<div style="font-size:0.90rem;color:#8a8a8a;margin-top:1px;">{sub}</div>' if sub else ""
             )
             st.markdown(
                 f'<div style="line-height:1.25;margin-bottom:8px;">'
-                f'<div style="font-size:0.7rem;color:#6b6b6b;">{label}</div>'
-                f'<div style="font-size:0.95rem;font-weight:600;{color_style}">{value_str}</div>'
+                f'<div style="font-size:1.20rem;color:#6b6b6b;">{label}</div>'
+                f'<div style="font-size:1.20rem;font-weight:600;{color_style}">{value_str}</div>'
                 f"{sub_html}"
                 f"</div>",
                 unsafe_allow_html=True,
@@ -744,20 +881,38 @@ with tab_race:
 
         def render_section_totals(df: pd.DataFrame, duration_hours: float):
             if not df.empty:
-                st.markdown("Totale per prodotto in questa sezione:")
-                st.dataframe(
-                    totale_per_prodotto(df).style.format(
-                        {
-                            "n": "{:.2f}",
-                            "LIQUIDO tot [ml]": "{:.0f}",
-                            "CARBO tot [g]": "{:.1f}",
-                            "SODIO tot [mg]": "{:.0f}",
-                            "CALORIE tot [kcal]": "{:.0f}",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                detail_cols = ["PRODOTTO"]
+                if time_dist:
+                    detail_cols.append("ORARIO_STR")
+                detail_cols += ["n", "LIQUIDO tot [ml]", "CARBO tot [g]", "SODIO tot [mg]", "CALORIE tot [kcal]", "note"]
+                with st.expander("📋 Dettaglio per prodotto (questa sezione)"):
+                    st.dataframe(
+                        df[detail_cols].rename(columns={"ORARIO_STR": "ORARIO"}).style.format(
+                            {
+                                "n": "{:.2f}",
+                                "LIQUIDO tot [ml]": "{:.0f}",
+                                "CARBO tot [g]": "{:.1f}",
+                                "SODIO tot [mg]": "{:.0f}",
+                                "CALORIE tot [kcal]": "{:.0f}",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                with st.expander("📊 Totale per prodotto (questa sezione)"):
+                    st.dataframe(
+                        totale_per_prodotto(df).style.format(
+                            {
+                                "n": "{:.2f}",
+                                "LIQUIDO tot [ml]": "{:.0f}",
+                                "CARBO tot [g]": "{:.1f}",
+                                "SODIO tot [mg]": "{:.0f}",
+                                "CALORIE tot [kcal]": "{:.0f}",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
             st.markdown("**Calcoli sezione**")
             render_summary(totals_dict_from(df), duration_hours)
 
@@ -799,7 +954,10 @@ with tab_race:
                             options=["—"] + other_sections,
                             key=f"race_copy_source_{sec_name}",
                         )
-                        if cpy2.button("Copia sezione", key=f"race_copy_btn_{sec_name}"):
+                        cpy2.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+                        if cpy2.button(
+                            "Copia sezione", key=f"race_copy_btn_{sec_name}", use_container_width=True
+                        ):
                             if copy_source != "—":
                                 source_items = [
                                     r for r in st.session_state.race_rows if r.get("SEZIONE") == copy_source
@@ -898,35 +1056,35 @@ with tab_race:
                     display_cols.append("ORARIO_STR")
                 display_cols += ["n", "LIQUIDO tot [ml]", "CARBO tot [g]", "SODIO tot [mg]", "CALORIE tot [kcal]", "note"]
 
-                st.markdown("**Dettaglio per prodotto**")
-                st.dataframe(
-                    rows[display_cols].rename(columns={"ORARIO_STR": "ORARIO"}).style.format(
-                        {
-                            "n": "{:.2f}",
-                            "LIQUIDO tot [ml]": "{:.0f}",
-                            "CARBO tot [g]": "{:.1f}",
-                            "SODIO tot [mg]": "{:.0f}",
-                            "CALORIE tot [kcal]": "{:.0f}",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                with st.expander("📋 Dettaglio per prodotto"):
+                    st.dataframe(
+                        rows[display_cols].rename(columns={"ORARIO_STR": "ORARIO"}).style.format(
+                            {
+                                "n": "{:.2f}",
+                                "LIQUIDO tot [ml]": "{:.0f}",
+                                "CARBO tot [g]": "{:.1f}",
+                                "SODIO tot [mg]": "{:.0f}",
+                                "CALORIE tot [kcal]": "{:.0f}",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
-                st.markdown("**Totale per prodotto (tutte le sezioni)**")
-                st.dataframe(
-                    totale_per_prodotto(rows).style.format(
-                        {
-                            "n": "{:.2f}",
-                            "LIQUIDO tot [ml]": "{:.0f}",
-                            "CARBO tot [g]": "{:.1f}",
-                            "SODIO tot [mg]": "{:.0f}",
-                            "CALORIE tot [kcal]": "{:.0f}",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                with st.expander("📊 Totale per prodotto (tutte le sezioni)"):
+                    st.dataframe(
+                        totale_per_prodotto(rows).style.format(
+                            {
+                                "n": "{:.2f}",
+                                "LIQUIDO tot [ml]": "{:.0f}",
+                                "CARBO tot [g]": "{:.1f}",
+                                "SODIO tot [mg]": "{:.0f}",
+                                "CALORIE tot [kcal]": "{:.0f}",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
             st.markdown("**Calcoli totali**")
             render_summary(totals, hours)
@@ -945,18 +1103,15 @@ with tab_race:
                 else:
                     buckets = hourly_buckets(total_minutes)
 
-                    def style_rate_col(col: pd.Series, target_key: str) -> list:
-                        tmin = st.session_state.targets["min"][target_key]
-                        tmax = st.session_state.targets["max"][target_key]
-                        styles = []
-                        for v in col:
-                            if pd.isna(v):
-                                styles.append("")
-                            elif v < tmin or v > tmax:
-                                styles.append("background-color: #ffd2d2; color: #7a0000;")
-                            else:
-                                styles.append("background-color: #d7f5d0; color: #175c17;")
-                        return styles
+                    def rate_dot(v, tmin, tmax) -> str:
+                        if pd.isna(v):
+                            return ""
+                        if v < tmin:
+                            return "🔴"  # sotto il minimo
+                        elif v > tmax:
+                            return "🟡"  # sopra il massimo
+                        else:
+                            return "🟢"  # nel range
 
                     records = []
                     for i, b in enumerate(buckets):
@@ -993,40 +1148,32 @@ with tab_race:
                     hourly_df[numeric_cols] = hourly_df[numeric_cols].apply(pd.to_numeric, errors="coerce")
 
                     st.caption(
-                        "🟢 verde = nel range dell'obiettivo · 🔴 rosso = fuori dal range "
-                        "(min/max modificabili nel tab Totali)."
+                        "🟢 nel range dell'obiettivo · 🟡 sopra il massimo · 🔴 sotto il minimo "
                     )
 
-                    # A column that is entirely NaN (e.g. sodium when no liquid was ever taken)
-                    # renders as the literal text "None" in Streamlit's dataframe grid instead of
-                    # respecting the Styler's format function — so build a text column with the
-                    # formatted/placeholder strings up front, and color it using the original
-                    # numeric values (captured separately) rather than relying on na_rep/.format().
                     decimals_by_col = {
                         "Liquido [ml/h]": 0,
                         "Carbo [g/h]": 1,
                         "Sodio [mg/l]": 0,
                         "Calorie [kcal/h]": 0,
                     }
+                    target_key_by_col = {
+                        "Liquido [ml/h]": "LIQUIDO [ml/h]",
+                        "Carbo [g/h]": "CARBO [g/h]",
+                        "Sodio [mg/l]": "SODIO [mg/l]",
+                        "Calorie [kcal/h]": "CALORIE [kcal/h]",
+                    }
                     display_df = hourly_df.copy()
                     for col, decimals in decimals_by_col.items():
+                        tkey = target_key_by_col[col]
+                        tmin = st.session_state.targets["min"][tkey]
+                        tmax = st.session_state.targets["max"][tkey]
                         display_df[col] = hourly_df[col].apply(
-                            lambda v, d=decimals: "—" if pd.isna(v) else f"{v:.{d}f}"
+                            lambda v, d=decimals, lo=tmin, hi=tmax: (
+                                "—" if pd.isna(v) else f"{rate_dot(v, lo, hi)} {v:.{d}f}"
+                            )
                         )
-
-                    styled = display_df.style
-                    for col_label, target_key in [
-                        ("Liquido [ml/h]", "LIQUIDO [ml/h]"),
-                        ("Carbo [g/h]", "CARBO [g/h]"),
-                        ("Sodio [mg/l]", "SODIO [mg/l]"),
-                        ("Calorie [kcal/h]", "CALORIE [kcal/h]"),
-                    ]:
-                        numeric_vals = hourly_df[col_label]
-                        styled = styled.apply(
-                            lambda _col, vals=numeric_vals, k=target_key: style_rate_col(vals, k),
-                            subset=[col_label],
-                        )
-                    st.dataframe(styled, use_container_width=True, hide_index=True)
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
                     fuori_gara = rows[rows["ORARIO_MIN"] > total_minutes] if not rows.empty else rows
                     if not rows.empty and len(fuori_gara) > 0:
@@ -1035,3 +1182,56 @@ with tab_race:
                             f"{len(fuori_gara)} riga/righe hanno un orario oltre la durata totale della gara "
                             f"({minutes_to_hhmm(total_minutes)}) e non compaiono qui sopra: {nomi}."
                         )
+
+# --------------------------------------------------------------- Esporta/Importa
+with tab_export:
+    st.subheader("Esporta / importa piano completo")
+    st.caption("Salva il piano gara (formato CSV) per visualizzarlo nuovamente in un secondo momento")
+
+    if "export_atleta" not in st.session_state:
+        st.session_state.export_atleta = ""
+    if "export_gara" not in st.session_state:
+        st.session_state.export_gara = ""
+
+    id1, id2 = st.columns(2)
+    st.session_state.export_atleta = id1.text_input("Nome atleta", value=st.session_state.export_atleta)
+    st.session_state.export_gara = id2.text_input("Gara", value=st.session_state.export_gara)
+
+    def _slug(s: str) -> str:
+        s = s.strip().replace(" ", "_")
+        return "".join(c for c in s if c.isalnum() or c == "_")
+
+    nome_file_parts = [p for p in [_slug(st.session_state.export_atleta), _slug(st.session_state.export_gara)] if p]
+    nome_file_parts.append("nutridrinkcalculator")
+    export_file_name = "_".join(nome_file_parts) + ".csv"
+
+    col_dl, col_up = st.columns(2, gap="large")
+
+    with col_dl:
+        st.markdown("**⬇️ Scarica il piano**")
+        st.caption("Esporta lo stato attuale (piano gara, obiettivi, prodotti) in un file CSV.")
+        st.download_button(
+            "Scarica piano (CSV)",
+            data=export_piano_csv(),
+            file_name=export_file_name,
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with col_up:
+        st.markdown("**⬆️ Carica un piano**")
+        st.caption("Sostituisce piano gara, obiettivi e prodotti attuali con quelli del file caricato.")
+        uploaded_piano = st.file_uploader(
+            "Carica piano (CSV)",
+            type=["csv"],
+            key="piano_uploader",
+            label_visibility="collapsed",
+        )
+        if uploaded_piano is not None:
+            if st.button("Sostituisci piano", type="primary", use_container_width=True, key="piano_replace_btn"):
+                try:
+                    import_piano_csv(uploaded_piano)
+                    st.success("Piano importato correttamente.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore nella lettura del file: {e}")
