@@ -18,7 +18,7 @@ Working areas:
 """
 
 import os
-from datetime import time as dtime
+import re
 
 import pandas as pd
 import streamlit as st
@@ -118,30 +118,26 @@ def minutes_to_hhmm(m: int) -> str:
     return f"{sign}{h}:{mm:02d}"
 
 
+HHMM_RE = re.compile(r"^\s*(\d{1,3}):([0-5]?\d)\s*$")
+
+
 def hhmm_input(label: str, total_minutes: int, key: str, container=None, max_hours: int = MAX_DURATION_HOURS) -> int:
-    """Render a native HH:MM clock picker (st.time_input) for a duration / time-of-day value.
-    Since st.time_input alone can't go past 24h, durations beyond a day are handled with a
-    small extra "giorni" field next to it (both together support up to `max_hours` hours)."""
+    """Render a single HH:MM text box for a duration / time-of-day value (supports up to
+    `max_hours` hours) and return the value as total minutes. Validates the format inline
+    and falls back to the last valid value if what's typed doesn't match HH:MM."""
     container = container if container is not None else st
     total_minutes = int(total_minutes) if total_minutes else 0
     total_minutes = max(0, min(total_minutes, max_hours * 60 + 59))
-    max_days = max(0, max_hours // 24)
-    days, rem_minutes = divmod(total_minutes, 24 * 60)
-    days = min(days, max_days)
-    hh, mm = divmod(rem_minutes, 60)
-
-    if max_days > 0:
-        col_d, col_t = container.columns([1, 2])
-        days_val = col_d.number_input(
-            f"{label} - giorni", min_value=0, max_value=max_days, value=int(days), step=1, key=f"{key}_days"
-        )
-        time_val = col_t.time_input(f"{label} - HH:MM", value=dtime(hh, mm), key=f"{key}_time")
-    else:
-        days_val = 0
-        time_val = container.time_input(f"{label} (HH:MM)", value=dtime(hh, mm), key=f"{key}_time")
-
-    total = int(days_val) * 24 * 60 + time_val.hour * 60 + time_val.minute
-    return max(0, min(total, max_hours * 60 + 59))
+    default_str = minutes_to_hhmm(total_minutes)
+    text = container.text_input(f"{label} (HH:MM)", value=default_str, key=key)
+    text = str(text) if text is not None else ""
+    match = HHMM_RE.match(text)
+    if not match:
+        container.caption("⚠️ Formato non valido: usa HH:MM (es. 4:30).")
+        return total_minutes
+    hh = min(int(match.group(1)), max_hours)
+    mm = int(match.group(2))
+    return hh * 60 + mm
 
 
 def section_boundaries(sections: list) -> list:
