@@ -37,6 +37,13 @@ DEFAULT_TARGETS = {
     "max": {"LIQUIDO [ml/h]": 950.0, "CARBO [g/h]": 90.0, "SODIO [mg/l]": 800.0, "CALORIE [kcal/h]": 360.0},
 }
 
+TARGET_LABELS = {
+    "LIQUIDO [ml/h]": "Liquido [ml/h]",
+    "CARBO [g/h]": "Carbo [g/h]",
+    "SODIO [mg/l]": "Sodio [mg/l]",
+    "CALORIE [kcal/h]": "Calorie [kcal/h]",
+}
+
 
 # ----------------------------------------------------------------------------
 # Data loading / persistence
@@ -148,7 +155,16 @@ def section_boundaries(sections: list) -> list:
         dur = int(s["durata"])
         start = cursor
         end = cursor + dur
-        bounds.append({"id": s["id"], "nome": s["nome"], "start": start, "end": end, "durata_min": dur})
+        bounds.append(
+            {
+                "id": s["id"],
+                "nome": s["nome"],
+                "start": start,
+                "end": end,
+                "durata_min": dur,
+                "note": s.get("note", ""),
+            }
+        )
         cursor = end
     return bounds
 
@@ -243,7 +259,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_inv, tab_plan, tab_race = st.tabs(["📦 Inventario", "🗺️ Piano gara", "🏃 Calcoli"])
+tab_inv, tab_targets, tab_plan, tab_race = st.tabs(
+    ["📦 Inventario", "🎯 Obiettivi", "🗺️ Piano gara", "🏃 Calcoli"]
+)
 
 # ---------------------------------------------------------------- Inventario
 with tab_inv:
@@ -352,6 +370,23 @@ with tab_inv:
                 except Exception as e:
                     st.error(f"Errore nella lettura del CSV: {e}")
 
+# ---------------------------------------------------------------- Obiettivi
+with tab_targets:
+    st.subheader("Obiettivi (min / max)")
+    st.caption(
+        "Range orario consigliato per liquido, carboidrati, sodio e calorie: usato per i confronti "
+        "nel tab Calcoli (totali, per sezione e distribuzione oraria)."
+    )
+    tcols = st.columns(4)
+    for i, key in enumerate(TARGET_LABELS):
+        with tcols[i]:
+            st.session_state.targets["min"][key] = st.number_input(
+                f"{TARGET_LABELS[key]} min", value=float(st.session_state.targets["min"][key]), key=f"min_{key}"
+            )
+            st.session_state.targets["max"][key] = st.number_input(
+                f"{TARGET_LABELS[key]} max", value=float(st.session_state.targets["max"][key]), key=f"max_{key}"
+            )
+
 # ---------------------------------------------------------------- Piano gara
 with tab_plan:
     st.subheader("Piano gara")
@@ -396,6 +431,9 @@ with tab_plan:
                 c4.write("")
                 if c4.button("🗑️", key=f"plan_del_{sid}", help="Rimuovi sezione"):
                     sections_to_remove.append(sid)
+                sec["note"] = st.text_input(
+                    "Note sezione", value=sec.get("note", ""), key=f"plan_note_{sid}"
+                )
 
         if sections_to_remove:
             st.session_state.plan_sections = [s for s in st.session_state.plan_sections if s["id"] not in sections_to_remove]
@@ -413,6 +451,7 @@ with tab_plan:
                     "id": st.session_state.plan_next_id,
                     "nome": f"Sezione {len(st.session_state.plan_sections) + 1}",
                     "durata": default_dur_min,
+                    "note": "",
                 }
             )
             st.session_state.plan_next_id += 1
@@ -569,35 +608,47 @@ with tab_race:
                 if c5.button("🗑️", key=f"race_del_{rid}", help="Rimuovi riga"):
                     rows_to_remove.append(rid)
 
-        target_labels = {
-            "LIQUIDO [ml/h]": "Liquido [ml/h]",
-            "CARBO [g/h]": "Carbo [g/h]",
-            "SODIO [mg/l]": "Sodio [mg/l]",
-            "CALORIE [kcal/h]": "Calorie [kcal/h]",
-        }
+        def compact_stat(label, value_str, sub=None, value_color=None):
+            """Small-font stat block — like st.metric but with a much smaller footprint,
+            used for the section/overall calcoli so many of them fit compactly."""
+            color_style = f"color:{value_color};" if value_color else ""
+            sub_html = (
+                f'<div style="font-size:0.68rem;color:#8a8a8a;margin-top:1px;">{sub}</div>' if sub else ""
+            )
+            st.markdown(
+                f'<div style="line-height:1.25;margin-bottom:8px;">'
+                f'<div style="font-size:0.7rem;color:#6b6b6b;">{label}</div>'
+                f'<div style="font-size:0.95rem;font-weight:600;{color_style}">{value_str}</div>'
+                f"{sub_html}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
         def render_rate(label, value, unit, target_key):
             tmin = st.session_state.targets["min"][target_key]
             tmax = st.session_state.targets["max"][target_key]
+            obiettivo = f"Obiettivo: {tmin:.0f}–{tmax:.0f} {unit}"
             if value is None:
-                st.metric(label, "—")
-                st.caption(f"Obiettivo: {tmin:.0f}–{tmax:.0f} {unit}")
+                compact_stat(label, "—", obiettivo)
                 return
             if value < tmin:
-                delta_txt, delta_color = "sotto obiettivo", "inverse"
+                sub, color = f"🔻 sotto obiettivo · {obiettivo}", "#b42318"
             elif value > tmax:
-                delta_txt, delta_color = "sopra obiettivo", "inverse"
+                sub, color = f"🔺 sopra obiettivo · {obiettivo}", "#b42318"
             else:
-                delta_txt, delta_color = "nel range ✅", "normal"
-            st.metric(label, f"{value:.1f} {unit}", delta=delta_txt, delta_color=delta_color)
-            st.caption(f"Obiettivo: {tmin:.0f}–{tmax:.0f} {unit}")
+                sub, color = f"✅ nel range · {obiettivo}", "#127a3c"
+            compact_stat(label, f"{value:.1f} {unit}", sub, value_color=color)
 
         def render_summary(totals_dict, duration_hours):
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Liquido totale", f"{totals_dict['LIQUIDO [ml]']:.0f} ml")
-            c2.metric("Carboidrati totali", f"{totals_dict['g CARBO']:.1f} g")
-            c3.metric("Sodio totale", f"{totals_dict['SODIO [mg]']:.0f} mg")
-            c4.metric("Calorie totali", f"{totals_dict['CALORIE [kcal]']:.0f} kcal")
+            with c1:
+                compact_stat("Liquido totale", f"{totals_dict['LIQUIDO [ml]']:.0f} ml")
+            with c2:
+                compact_stat("Carboidrati totali", f"{totals_dict['g CARBO']:.1f} g")
+            with c3:
+                compact_stat("Sodio totale", f"{totals_dict['SODIO [mg]']:.0f} mg")
+            with c4:
+                compact_stat("Calorie totali", f"{totals_dict['CALORIE [kcal]']:.0f} kcal")
 
             liquido_h = totals_dict["LIQUIDO [ml]"] / duration_hours if duration_hours > 0 else None
             carbo_h = totals_dict["g CARBO"] / duration_hours if duration_hours > 0 else None
@@ -692,7 +743,6 @@ with tab_race:
             }
 
         def render_section_totals(df: pd.DataFrame, duration_hours: float):
-            render_summary(totals_dict_from(df), duration_hours)
             if not df.empty:
                 st.markdown("Totale per prodotto in questa sezione:")
                 st.dataframe(
@@ -708,6 +758,8 @@ with tab_race:
                     use_container_width=True,
                     hide_index=True,
                 )
+            st.markdown("**Calcoli sezione**")
+            render_summary(totals_dict_from(df), duration_hours)
 
         # ---- one flat row of tabs: sections (or "Prodotti"), Totali, Distribuzione oraria ----
         if plan_active:
@@ -730,6 +782,15 @@ with tab_race:
         if plan_active:
             for sec_name, b, sec_tab in zip(section_names, plan_bounds, section_tab_objs):
                 with sec_tab:
+                    header_line = (
+                        f"⏱️ Durata: **{minutes_to_hhmm(b['durata_min'])}** &nbsp;·&nbsp; "
+                        f"📍 {minutes_to_hhmm(b['start'])} → {minutes_to_hhmm(b['end'])} nella gara"
+                    )
+                    st.markdown(header_line)
+                    if b.get("note"):
+                        st.caption(f"📝 {b['note']}")
+                    st.divider()
+
                     other_sections = [s for s in section_names if s != sec_name]
                     if other_sections:
                         cpy1, cpy2 = st.columns([3, 1])
@@ -829,17 +890,6 @@ with tab_race:
 
         # ------------------------------------------------------------------ Totali
         with tab_totals:
-            with st.expander("🎯 Obiettivi (min / max) — modificabili", expanded=False):
-                tcols = st.columns(4)
-                for i, key in enumerate(target_labels):
-                    with tcols[i]:
-                        st.session_state.targets["min"][key] = st.number_input(
-                            f"{target_labels[key]} min", value=float(st.session_state.targets["min"][key]), key=f"min_{key}"
-                        )
-                        st.session_state.targets["max"][key] = st.number_input(
-                            f"{target_labels[key]} max", value=float(st.session_state.targets["max"][key]), key=f"max_{key}"
-                        )
-
             if not rows.empty:
                 display_cols = ["PRODOTTO"]
                 if plan_active:
@@ -863,10 +913,6 @@ with tab_race:
                     hide_index=True,
                 )
 
-            st.markdown("### Totali generali")
-            render_summary(totals, hours)
-
-            if not rows.empty:
                 st.markdown("**Totale per prodotto (tutte le sezioni)**")
                 st.dataframe(
                     totale_per_prodotto(rows).style.format(
@@ -881,6 +927,9 @@ with tab_race:
                     use_container_width=True,
                     hide_index=True,
                 )
+
+            st.markdown("**Calcoli totali**")
+            render_summary(totals, hours)
 
         # ------------------------------------------------------- Distribuzione oraria
         with tab_hourly:
