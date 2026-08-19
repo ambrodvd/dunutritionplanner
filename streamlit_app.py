@@ -18,10 +18,12 @@ Working areas:
 """
 
 import os
-from datetime import time
+from datetime import time as dtime
 
 import pandas as pd
 import streamlit as st
+
+MAX_DURATION_HOURS = 99
 
 st.set_page_config(page_title="DU Nutri & Drink Calculator", page_icon="🥤", layout="wide")
 
@@ -108,10 +110,6 @@ def next_id(rows: list) -> int:
 # ----------------------------------------------------------------------------
 # Piano gara helpers
 # ----------------------------------------------------------------------------
-def time_to_minutes(t: time) -> int:
-    return t.hour * 60 + t.minute
-
-
 def minutes_to_hhmm(m: int) -> str:
     m = int(round(m))
     sign = "-" if m < 0 else ""
@@ -120,12 +118,38 @@ def minutes_to_hhmm(m: int) -> str:
     return f"{sign}{h}:{mm:02d}"
 
 
+def hhmm_input(label: str, total_minutes: int, key: str, container=None, max_hours: int = MAX_DURATION_HOURS) -> int:
+    """Render a native HH:MM clock picker (st.time_input) for a duration / time-of-day value.
+    Since st.time_input alone can't go past 24h, durations beyond a day are handled with a
+    small extra "giorni" field next to it (both together support up to `max_hours` hours)."""
+    container = container if container is not None else st
+    total_minutes = int(total_minutes) if total_minutes else 0
+    total_minutes = max(0, min(total_minutes, max_hours * 60 + 59))
+    max_days = max(0, max_hours // 24)
+    days, rem_minutes = divmod(total_minutes, 24 * 60)
+    days = min(days, max_days)
+    hh, mm = divmod(rem_minutes, 60)
+
+    if max_days > 0:
+        col_d, col_t = container.columns([1, 2])
+        days_val = col_d.number_input(
+            f"{label} - giorni", min_value=0, max_value=max_days, value=int(days), step=1, key=f"{key}_days"
+        )
+        time_val = col_t.time_input(f"{label} - HH:MM", value=dtime(hh, mm), key=f"{key}_time")
+    else:
+        days_val = 0
+        time_val = container.time_input(f"{label} (HH:MM)", value=dtime(hh, mm), key=f"{key}_time")
+
+    total = int(days_val) * 24 * 60 + time_val.hour * 60 + time_val.minute
+    return max(0, min(total, max_hours * 60 + 59))
+
+
 def section_boundaries(sections: list) -> list:
     """Return sections with cumulative start/end (in minutes), in insertion order."""
     bounds = []
     cursor = 0
     for s in sections:
-        dur = time_to_minutes(s["durata"])
+        dur = int(s["durata"])
         start = cursor
         end = cursor + dur
         bounds.append({"id": s["id"], "nome": s["nome"], "start": start, "end": end, "durata_min": dur})
@@ -162,7 +186,7 @@ if "race_rows" not in st.session_state:
             "LIQUIDO [ml/unita]": 0.0,
             "note": "",
             "SEZIONE": None,
-            "ORARIO": time(0, 0),
+            "ORARIO": 0,
         }
     ]
     st.session_state.race_next_id = 1
@@ -180,7 +204,7 @@ if "plan_enabled" not in st.session_state:
     st.session_state.plan_enabled = False
 
 if "plan_total_time" not in st.session_state:
-    st.session_state.plan_total_time = time(4, 0)
+    st.session_state.plan_total_time = 4 * 60
 
 if "plan_sections" not in st.session_state:
     st.session_state.plan_sections = []
@@ -247,7 +271,7 @@ with tab_inv:
                 "CALORIE [kcal]", value=float(row["CALORIE [kcal]"]), min_value=0.0, step=1.0, format="%.1f", key=f"inv_cal_{rid}"
             )
             c6.write("")
-            if c6.button("🗑️", key=f"inv_del_{rid}", help="Rimuovi item"):
+            if c6.button("🗑️", key=f"inv_del_{rid}", help="Rimuovi prodotto"):
                 rows_to_remove.append(rid)
 
     if rows_to_remove:
@@ -348,11 +372,12 @@ with tab_plan:
             "che sul totale."
         )
     else:
-        st.session_state.plan_total_time = st.time_input(
-            "⏱️ Tempo totale gara (hh:mm)",
-            value=st.session_state.plan_total_time,
+        st.session_state.plan_total_time = hhmm_input(
+            "⏱️ Tempo totale gara",
+            st.session_state.plan_total_time,
+            key="plan_total_time_hhmm",
         )
-        total_min = time_to_minutes(st.session_state.plan_total_time)
+        total_min = st.session_state.plan_total_time
 
         st.markdown("**Sezioni**")
         st.caption(
@@ -367,8 +392,10 @@ with tab_plan:
             with st.container(border=True):
                 c1, c2, c3, c4 = st.columns([2.4, 1.4, 1.8, 0.6])
                 sec["nome"] = c1.text_input("Nome sezione", value=sec["nome"], key=f"plan_nome_{sid}")
-                sec["durata"] = c2.time_input("Durata sezione (hh:mm)", value=sec["durata"], key=f"plan_durata_{sid}")
-                c3.markdown(f"**{minutes_to_hhmm(b['start'])} → {minutes_to_hhmm(b['start'] + time_to_minutes(sec['durata']))}**")
+                sec["durata"] = hhmm_input(
+                    "Durata sezione", sec["durata"], key=f"plan_durata_hhmm_{sid}", container=c2
+                )
+                c3.markdown(f"**{minutes_to_hhmm(b['start'])} → {minutes_to_hhmm(b['start'] + sec['durata'])}**")
                 c3.caption("inizio → fine (calcolato)")
                 c4.write("")
                 if c4.button("🗑️", key=f"plan_del_{sid}", help="Rimuovi sezione"):
@@ -385,12 +412,11 @@ with tab_plan:
 
         if st.button("➕ Aggiungi sezione"):
             default_dur_min = max(remaining_min, 0)
-            default_dur = time(default_dur_min // 60, default_dur_min % 60)
             st.session_state.plan_sections.append(
                 {
                     "id": st.session_state.plan_next_id,
                     "nome": f"Sezione {len(st.session_state.plan_sections) + 1}",
-                    "durata": default_dur,
+                    "durata": default_dur_min,
                 }
             )
             st.session_state.plan_next_id += 1
@@ -424,8 +450,10 @@ with tab_race:
         "Vuoi analizzare la distribuzione nel tempo?",
         value=st.session_state.time_dist_enabled,
         help=(
-            "Se attivo, per ogni prodotto indichi anche l'orario (hh:mm trascorso dalla partenza) in "
-            "cui verrà consumato: in fondo trovi il confronto ora per ora con i tassi orari consigliati."
+            "Se attivo, per ogni prodotto indichi anche il tempo (HH:MM) trascorso dall'inizio — se "
+            "il piano gara è attivo, dall'inizio della sezione a cui appartiene, altrimenti dalla "
+            "partenza: nel tab 'Distribuzione oraria' trovi il confronto ora per ora con i tassi "
+            "orari consigliati."
         ),
     )
 
@@ -444,29 +472,28 @@ with tab_race:
     plan_active = False
     if st.session_state.plan_enabled and st.session_state.plan_sections:
         plan_bounds = section_boundaries(st.session_state.plan_sections)
-        plan_total_min = time_to_minutes(st.session_state.plan_total_time)
+        plan_total_min = st.session_state.plan_total_time
         plan_assigned_min = plan_bounds[-1]["end"] if plan_bounds else 0
         plan_active = plan_total_min > 0 and plan_assigned_min == plan_total_min
     section_names = [b["nome"] for b in plan_bounds] if plan_active else []
 
     if not item_options:
-        st.warning("L'inventario è vuoto: aggiungi almeno un item nella tab Inventario.")
+        st.warning("L'inventario è vuoto: aggiungi almeno un prodotto nella tab Inventario.")
     else:
         if plan_active:
-            hours = time_to_minutes(st.session_state.plan_total_time) / 60.0
+            hours = st.session_state.plan_total_time / 60.0
             st.info(
                 f"🗺️ Piano gara attivo: {len(section_names)} sezioni, durata totale "
-                f"{minutes_to_hhmm(time_to_minutes(st.session_state.plan_total_time))}. La durata gara "
+                f"{minutes_to_hhmm(st.session_state.plan_total_time)}. La durata gara "
                 f"è presa dal Piano gara."
             )
         else:
-            st.session_state.race_hours = st.number_input(
+            race_total_min = hhmm_input(
                 "⏱️ Ore corsa (durata gara)",
-                min_value=0.0,
-                value=float(st.session_state.race_hours),
-                step=0.25,
-                format="%.2f",
+                int(round(st.session_state.race_hours * 60)),
+                key="race_hours_hhmm",
             )
+            st.session_state.race_hours = race_total_min / 60.0
             hours = st.session_state.race_hours
             if st.session_state.plan_enabled:
                 st.caption(
@@ -474,38 +501,31 @@ with tab_race:
                     "totale): completalo nel tab 'Piano gara' per attivare i calcoli per sezione."
                 )
 
-        st.markdown("**Item usati durante la corsa**")
-        if plan_active:
-            st.caption(
-                "Per ogni riga: scegli il PRODOTTO dall'inventario, la sezione del piano gara in cui "
-                "viene usato, la quantità (n) e, se vuoi calcolare anche il liquido, i ml per unità."
-            )
-        else:
-            st.caption(
-                "Per ogni riga: scegli il PRODOTTO dall'inventario, la quantità (n) e, se vuoi calcolare "
-                "anche il liquido, i ml per unità (es. ml d'acqua usati per sciogliere una tavoletta, "
-                "o ml di una borraccia)."
-            )
-
         time_dist = st.session_state.time_dist_enabled
         plan_bounds_by_name = {b["nome"]: b for b in plan_bounds} if plan_active else {}
 
+        if plan_active:
+            # keep rows created before the plan existed (or from a deleted section) visible
+            # somewhere instead of silently dropping them from every tab
+            for r in st.session_state.race_rows:
+                if r.get("SEZIONE") not in section_names:
+                    r["SEZIONE"] = section_names[0]
+
         rows_to_remove = []
-        for row in st.session_state.race_rows:
+        rows_to_add = []
+
+        def render_race_row(row, section_name):
             rid = row["id"]
             with st.container(border=True):
                 widths = [2.0, 0.9, 1.1]
-                if plan_active:
-                    widths.append(1.3)
                 if time_dist:
-                    widths.append(1.1)
+                    widths.append(1.3)
                 widths += [1.3, 0.5]
                 cols = list(st.columns(widths))
 
                 c1 = cols.pop(0)
                 c2 = cols.pop(0)
                 c3 = cols.pop(0)
-                c_sec = cols.pop(0) if plan_active else None
                 c_time = cols.pop(0) if time_dist else None
                 c4 = cols.pop(0)
                 c5 = cols.pop(0)
@@ -526,38 +546,26 @@ with tab_race:
                     key=f"race_liq_{rid}",
                 )
 
-                if plan_active:
-                    current_sez = row.get("SEZIONE") if row.get("SEZIONE") in section_names else None
-                    sez_idx = section_names.index(current_sez) if current_sez in section_names else 0
-                    row["SEZIONE"] = c_sec.selectbox(
-                        "Sezione", options=section_names, index=sez_idx, key=f"race_sez_{rid}"
-                    )
-                else:
-                    row["SEZIONE"] = None
+                row["SEZIONE"] = section_name
 
                 if time_dist:
                     current_orario = row.get("ORARIO")
-                    if not isinstance(current_orario, time):
-                        current_orario = time(0, 0)
-                    row["ORARIO"] = c_time.time_input(
-                        "Tempo da partenza", value=current_orario, key=f"race_orario_{rid}"
+                    if not isinstance(current_orario, (int, float)):
+                        current_orario = 0
+                    orario_label = "Tempo dall'inizio sezione" if section_name else "Tempo da partenza"
+                    row["ORARIO"] = hhmm_input(
+                        orario_label, current_orario, key=f"race_orario_{rid}", container=c_time
                     )
                 else:
-                    row["ORARIO"] = row.get("ORARIO") if isinstance(row.get("ORARIO"), time) else time(0, 0)
+                    row["ORARIO"] = row.get("ORARIO") if isinstance(row.get("ORARIO"), (int, float)) else 0
 
-                if plan_active and time_dist and row["SEZIONE"] in plan_bounds_by_name:
-                    b = plan_bounds_by_name[row["SEZIONE"]]
-                    orario_min = time_to_minutes(row["ORARIO"])
-                    is_first_section = b["start"] == 0
-                    in_range = (
-                        (b["start"] <= orario_min <= b["end"])
-                        if is_first_section
-                        else (b["start"] < orario_min <= b["end"])
-                    )
-                    if not in_range:
+                if time_dist and section_name and section_name in plan_bounds_by_name:
+                    b = plan_bounds_by_name[section_name]
+                    orario_rel = int(row["ORARIO"])
+                    if not (0 <= orario_rel <= b["durata_min"]):
                         st.warning(
-                            f"⚠️ Orario {minutes_to_hhmm(orario_min)} fuori dalla sezione "
-                            f"**{row['SEZIONE']}** ({minutes_to_hhmm(b['start'])} → {minutes_to_hhmm(b['end'])})."
+                            f"⚠️ Tempo {minutes_to_hhmm(orario_rel)} fuori dalla durata della sezione "
+                            f"**{section_name}** ({minutes_to_hhmm(b['durata_min'])})."
                         )
 
                 row["note"] = c4.text_input("note", value=row["note"], key=f"race_note_{rid}")
@@ -565,97 +573,12 @@ with tab_race:
                 if c5.button("🗑️", key=f"race_del_{rid}", help="Rimuovi riga"):
                     rows_to_remove.append(rid)
 
-        if rows_to_remove:
-            st.session_state.race_rows = [r for r in st.session_state.race_rows if r["id"] not in rows_to_remove]
-            st.rerun()
-
-        if st.button("➕ Aggiungi item"):
-            st.session_state.race_rows.append(
-                {
-                    "id": st.session_state.race_next_id,
-                    "PRODOTTO": item_options[0] if item_options else None,
-                    "n": 1.0,
-                    "LIQUIDO [ml/unita]": 0.0,
-                    "note": "",
-                    "SEZIONE": section_names[0] if section_names else None,
-                    "ORARIO": time(0, 0),
-                }
-            )
-            st.session_state.race_next_id += 1
-            st.rerun()
-
-        # ---- compute per-row totals ----
-        rows = pd.DataFrame(st.session_state.race_rows)
-        rows = rows[rows["PRODOTTO"].isin(item_options)].copy()
-        if "SEZIONE" not in rows.columns:
-            rows["SEZIONE"] = None
-        if "ORARIO" not in rows.columns:
-            rows["ORARIO"] = time(0, 0)
-        rows["ORARIO"] = rows["ORARIO"].apply(lambda t: t if isinstance(t, time) else time(0, 0))
-        rows["ORARIO_MIN"] = rows["ORARIO"].apply(time_to_minutes)
-        rows["ORARIO_STR"] = rows["ORARIO_MIN"].apply(minutes_to_hhmm)
-
-        if rows.empty:
-            totals = {"LIQUIDO [ml]": 0.0, "g CARBO": 0.0, "SODIO [mg]": 0.0, "CALORIE [kcal]": 0.0}
-        else:
-            rows["n"] = pd.to_numeric(rows["n"], errors="coerce").fillna(0.0)
-            rows["LIQUIDO [ml/unita]"] = pd.to_numeric(rows["LIQUIDO [ml/unita]"], errors="coerce").fillna(0.0)
-
-            rows = rows.join(inv_lookup, on="PRODOTTO")
-            rows["g CARBO"] = rows["g CARBO"].fillna(0.0)
-            rows["SODIO [mg]"] = rows["SODIO [mg]"].fillna(0.0)
-            rows["CALORIE [kcal]"] = rows["CALORIE [kcal]"].fillna(0.0)
-
-            rows["LIQUIDO tot [ml]"] = rows["LIQUIDO [ml/unita]"] * rows["n"]
-            rows["CARBO tot [g]"] = rows["g CARBO"] * rows["n"]
-            rows["SODIO tot [mg]"] = rows["SODIO [mg]"] * rows["n"]
-            rows["CALORIE tot [kcal]"] = rows["CALORIE [kcal]"] * rows["n"]
-
-            display_cols = ["PRODOTTO"]
-            if plan_active:
-                display_cols.append("SEZIONE")
-            if time_dist:
-                display_cols.append("ORARIO_STR")
-            display_cols += ["n", "LIQUIDO tot [ml]", "CARBO tot [g]", "SODIO tot [mg]", "CALORIE tot [kcal]", "note"]
-
-            st.markdown("**Dettaglio per item**")
-            st.dataframe(
-                rows[display_cols].rename(columns={"ORARIO_STR": "ORARIO"}).style.format(
-                    {
-                        "n": "{:.2f}",
-                        "LIQUIDO tot [ml]": "{:.0f}",
-                        "CARBO tot [g]": "{:.1f}",
-                        "SODIO tot [mg]": "{:.0f}",
-                        "CALORIE tot [kcal]": "{:.0f}",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            totals = {
-                "LIQUIDO [ml]": rows["LIQUIDO tot [ml]"].sum(),
-                "g CARBO": rows["CARBO tot [g]"].sum(),
-                "SODIO [mg]": rows["SODIO tot [mg]"].sum(),
-                "CALORIE [kcal]": rows["CALORIE tot [kcal]"].sum(),
-            }
-
-        with st.expander("🎯 Obiettivi (min / max) — modificabili", expanded=False):
-            tcols = st.columns(4)
-            labels = {
-                "LIQUIDO [ml/h]": "Liquido [ml/h]",
-                "CARBO [g/h]": "Carbo [g/h]",
-                "SODIO [mg/l]": "Sodio [mg/l]",
-                "CALORIE [kcal/h]": "Calorie [kcal/h]",
-            }
-            for i, key in enumerate(labels):
-                with tcols[i]:
-                    st.session_state.targets["min"][key] = st.number_input(
-                        f"{labels[key]} min", value=float(st.session_state.targets["min"][key]), key=f"min_{key}"
-                    )
-                    st.session_state.targets["max"][key] = st.number_input(
-                        f"{labels[key]} max", value=float(st.session_state.targets["max"][key]), key=f"max_{key}"
-                    )
+        target_labels = {
+            "LIQUIDO [ml/h]": "Liquido [ml/h]",
+            "CARBO [g/h]": "Carbo [g/h]",
+            "SODIO [mg/l]": "Sodio [mg/l]",
+            "CALORIE [kcal/h]": "Calorie [kcal/h]",
+        }
 
         def render_rate(label, value, unit, target_key):
             tmin = st.session_state.targets["min"][target_key]
@@ -704,75 +627,366 @@ with tab_race:
             if totals_dict["LIQUIDO [ml]"] <= 0:
                 st.info("Inserisci almeno un liquido (ml/unità) per calcolare la concentrazione di sodio (mg/l).")
 
-        st.markdown("### Totali generali")
-        render_summary(totals, hours)
+        def totale_per_prodotto(df: pd.DataFrame) -> pd.DataFrame:
+            """Group rows by PRODOTTO, summing quantities — e.g. lo stesso prodotto preso a 0:30
+            e di nuovo all'1:00 compare come un'unica riga con quantità 2."""
+            if df.empty:
+                return pd.DataFrame(
+                    columns=["PRODOTTO", "n", "LIQUIDO tot [ml]", "CARBO tot [g]", "SODIO tot [mg]", "CALORIE tot [kcal]"]
+                )
+            return (
+                df.groupby("PRODOTTO", as_index=False)[
+                    ["n", "LIQUIDO tot [ml]", "CARBO tot [g]", "SODIO tot [mg]", "CALORIE tot [kcal]"]
+                ]
+                .sum()
+                .sort_values("PRODOTTO")
+            )
 
-        # ---- per-section breakdown ----
-        if plan_active:
-            st.divider()
-            st.markdown("### Dettaglio per sezione")
-            for b in plan_bounds:
-                sec_rows = rows[rows["SEZIONE"] == b["nome"]] if not rows.empty else rows
-                if not rows.empty:
-                    sec_totals = {
-                        "LIQUIDO [ml]": sec_rows["LIQUIDO tot [ml]"].sum(),
-                        "g CARBO": sec_rows["CARBO tot [g]"].sum(),
-                        "SODIO [mg]": sec_rows["SODIO tot [mg]"].sum(),
-                        "CALORIE [kcal]": sec_rows["CALORIE tot [kcal]"].sum(),
-                    }
-                else:
-                    sec_totals = {"LIQUIDO [ml]": 0.0, "g CARBO": 0.0, "SODIO [mg]": 0.0, "CALORIE [kcal]": 0.0}
-                sec_hours = b["durata_min"] / 60.0
-
-                with st.container(border=True):
-                    st.markdown(
-                        f"**{b['nome']}** &nbsp;·&nbsp; {minutes_to_hhmm(b['start'])} → "
-                        f"{minutes_to_hhmm(b['end'])} &nbsp;({minutes_to_hhmm(b['durata_min'])})"
-                    )
-                    render_summary(sec_totals, sec_hours)
-
-        # ---- hour-by-hour breakdown ----
-        if time_dist:
-            st.divider()
-            st.markdown("### Distribuzione nel tempo — ora per ora")
-
-            total_minutes = int(round(hours * 60))
-            if total_minutes <= 0:
-                st.info("Imposta una durata gara valida (Piano gara o campo Ore corsa) per l'analisi oraria.")
+        def compute_rows_df(items: list) -> pd.DataFrame:
+            """Join a list of race_rows dicts with the inventory and compute totals + ORARIO_MIN
+            (race-absolute minutes)."""
+            df = pd.DataFrame(items)
+            if df.empty or "PRODOTTO" not in df.columns:
+                return pd.DataFrame(
+                    columns=[
+                        "PRODOTTO", "SEZIONE", "ORARIO", "ORARIO_MIN", "ORARIO_STR", "n",
+                        "LIQUIDO [ml/unita]", "note", "LIQUIDO tot [ml]", "CARBO tot [g]",
+                        "SODIO tot [mg]", "CALORIE tot [kcal]",
+                    ]
+                )
+            df = df[df["PRODOTTO"].isin(item_options)].copy()
+            if df.empty:
+                return df
+            if "SEZIONE" not in df.columns:
+                df["SEZIONE"] = None
+            if "ORARIO" not in df.columns:
+                df["ORARIO"] = 0
+            df["ORARIO"] = df["ORARIO"].apply(lambda t: int(t) if isinstance(t, (int, float)) else 0)
+            if plan_active:
+                section_start_by_name = {b["nome"]: b["start"] for b in plan_bounds}
+                df["ORARIO_MIN"] = df.apply(
+                    lambda r: section_start_by_name.get(r["SEZIONE"], 0) + r["ORARIO"], axis=1
+                )
             else:
-                buckets = hourly_buckets(total_minutes)
-                fuori_gara = rows[rows["ORARIO_MIN"] > total_minutes] if not rows.empty else rows
-                if not rows.empty and len(fuori_gara) > 0:
-                    nomi = ", ".join(sorted(set(fuori_gara["PRODOTTO"].tolist())))
-                    st.warning(
-                        f"{len(fuori_gara)} riga/righe hanno un orario oltre la durata totale della gara "
-                        f"({minutes_to_hhmm(total_minutes)}) e non compaiono qui sotto: {nomi}."
+                df["ORARIO_MIN"] = df["ORARIO"]
+            df["ORARIO_STR"] = df["ORARIO_MIN"].apply(minutes_to_hhmm)
+
+            df["n"] = pd.to_numeric(df["n"], errors="coerce").fillna(0.0)
+            df["LIQUIDO [ml/unita]"] = pd.to_numeric(df["LIQUIDO [ml/unita]"], errors="coerce").fillna(0.0)
+
+            df = df.join(inv_lookup, on="PRODOTTO")
+            df["g CARBO"] = df["g CARBO"].fillna(0.0)
+            df["SODIO [mg]"] = df["SODIO [mg]"].fillna(0.0)
+            df["CALORIE [kcal]"] = df["CALORIE [kcal]"].fillna(0.0)
+
+            df["LIQUIDO tot [ml]"] = df["LIQUIDO [ml/unita]"] * df["n"]
+            df["CARBO tot [g]"] = df["g CARBO"] * df["n"]
+            df["SODIO tot [mg]"] = df["SODIO [mg]"] * df["n"]
+            df["CALORIE tot [kcal]"] = df["CALORIE [kcal]"] * df["n"]
+            return df
+
+        def totals_dict_from(df: pd.DataFrame) -> dict:
+            if df.empty:
+                return {"LIQUIDO [ml]": 0.0, "g CARBO": 0.0, "SODIO [mg]": 0.0, "CALORIE [kcal]": 0.0}
+            return {
+                "LIQUIDO [ml]": df["LIQUIDO tot [ml]"].sum(),
+                "g CARBO": df["CARBO tot [g]"].sum(),
+                "SODIO [mg]": df["SODIO tot [mg]"].sum(),
+                "CALORIE [kcal]": df["CALORIE tot [kcal]"].sum(),
+            }
+
+        def render_section_totals(df: pd.DataFrame, duration_hours: float):
+            render_summary(totals_dict_from(df), duration_hours)
+            if not df.empty:
+                st.markdown("Totale per prodotto in questa sezione:")
+                st.dataframe(
+                    totale_per_prodotto(df).style.format(
+                        {
+                            "n": "{:.2f}",
+                            "LIQUIDO tot [ml]": "{:.0f}",
+                            "CARBO tot [g]": "{:.1f}",
+                            "SODIO tot [mg]": "{:.0f}",
+                            "CALORIE tot [kcal]": "{:.0f}",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # ---- one flat row of tabs: sections (or "Prodotti"), Totali, Distribuzione oraria ----
+        if plan_active:
+            tab_labels = list(section_names) + ["📊 Totali", "⏱️ Distribuzione oraria"]
+        else:
+            tab_labels = ["📦 Prodotti", "📊 Totali", "⏱️ Distribuzione oraria"]
+        all_tabs = st.tabs(tab_labels)
+
+        if plan_active:
+            n_sections = len(section_names)
+            section_tab_objs = all_tabs[:n_sections]
+            tab_totals = all_tabs[n_sections]
+            tab_hourly = all_tabs[n_sections + 1]
+        else:
+            tab_prodotti = all_tabs[0]
+            tab_totals = all_tabs[1]
+            tab_hourly = all_tabs[2]
+
+        # ------------------------------------------------------------ Sezioni / Prodotti
+        if plan_active:
+            for sec_name, b, sec_tab in zip(section_names, plan_bounds, section_tab_objs):
+                with sec_tab:
+                    other_sections = [s for s in section_names if s != sec_name]
+                    if other_sections:
+                        cpy1, cpy2 = st.columns([3, 1])
+                        copy_source = cpy1.selectbox(
+                            "📋 Copia tutti i prodotti da un'altra sezione",
+                            options=["—"] + other_sections,
+                            key=f"race_copy_source_{sec_name}",
+                        )
+                        if cpy2.button("Copia sezione", key=f"race_copy_btn_{sec_name}"):
+                            if copy_source != "—":
+                                source_items = [
+                                    r for r in st.session_state.race_rows if r.get("SEZIONE") == copy_source
+                                ]
+                                for r in source_items:
+                                    rows_to_add.append(
+                                        {
+                                            "PRODOTTO": r["PRODOTTO"],
+                                            "n": r["n"],
+                                            "LIQUIDO [ml/unita]": r["LIQUIDO [ml/unita]"],
+                                            "note": r["note"],
+                                            "SEZIONE": sec_name,
+                                            "ORARIO": r.get("ORARIO", 0),
+                                        }
+                                    )
+                            else:
+                                st.warning("Scegli prima la sezione sorgente.")
+
+                    sec_items = [r for r in st.session_state.race_rows if r.get("SEZIONE") == sec_name]
+                    if not sec_items:
+                        st.caption(
+                            "Nessun prodotto in questa sezione: aggiungine uno qui sotto, oppure copia "
+                            "l'intera lista da un'altra sezione."
+                        )
+                    for row in sec_items:
+                        render_race_row(row, sec_name)
+
+                    if st.button("➕ Aggiungi prodotto", key=f"race_add_{sec_name}"):
+                        st.session_state.race_rows.append(
+                            {
+                                "id": st.session_state.race_next_id,
+                                "PRODOTTO": item_options[0] if item_options else None,
+                                "n": 1.0,
+                                "LIQUIDO [ml/unita]": 0.0,
+                                "note": "",
+                                "SEZIONE": sec_name,
+                                "ORARIO": 0,
+                            }
+                        )
+                        st.session_state.race_next_id += 1
+                        st.rerun()
+
+                    sec_df = compute_rows_df(sec_items)
+                    st.divider()
+                    st.markdown(f"### Totale sezione — {sec_name}")
+                    render_section_totals(sec_df, b["durata_min"] / 60.0)
+        else:
+            with tab_prodotti:
+                st.caption(
+                    "Per ogni riga: scegli il PRODOTTO dall'inventario, la quantità (n) e, se vuoi calcolare "
+                    "anche il liquido, i ml per unità (es. ml d'acqua usati per sciogliere una tavoletta, "
+                    "o ml di una borraccia)."
+                )
+                for row in st.session_state.race_rows:
+                    render_race_row(row, None)
+
+                if st.button("➕ Aggiungi prodotto"):
+                    st.session_state.race_rows.append(
+                        {
+                            "id": st.session_state.race_next_id,
+                            "PRODOTTO": item_options[0] if item_options else None,
+                            "n": 1.0,
+                            "LIQUIDO [ml/unita]": 0.0,
+                            "note": "",
+                            "SEZIONE": None,
+                            "ORARIO": 0,
+                        }
+                    )
+                    st.session_state.race_next_id += 1
+                    st.rerun()
+
+        if rows_to_add:
+            for new_row in rows_to_add:
+                new_row["id"] = st.session_state.race_next_id
+                st.session_state.race_next_id += 1
+                st.session_state.race_rows.append(new_row)
+            st.rerun()
+
+        if rows_to_remove:
+            st.session_state.race_rows = [
+                r for r in st.session_state.race_rows if r["id"] not in rows_to_remove
+            ]
+            st.rerun()
+
+        # ---- overall totals (used by both the Totali and Distribuzione oraria tabs) ----
+        rows = compute_rows_df(st.session_state.race_rows)
+        totals = totals_dict_from(rows)
+
+        # ------------------------------------------------------------------ Totali
+        with tab_totals:
+            with st.expander("🎯 Obiettivi (min / max) — modificabili", expanded=False):
+                tcols = st.columns(4)
+                for i, key in enumerate(target_labels):
+                    with tcols[i]:
+                        st.session_state.targets["min"][key] = st.number_input(
+                            f"{target_labels[key]} min", value=float(st.session_state.targets["min"][key]), key=f"min_{key}"
+                        )
+                        st.session_state.targets["max"][key] = st.number_input(
+                            f"{target_labels[key]} max", value=float(st.session_state.targets["max"][key]), key=f"max_{key}"
+                        )
+
+            if not rows.empty:
+                display_cols = ["PRODOTTO"]
+                if plan_active:
+                    display_cols.append("SEZIONE")
+                if time_dist:
+                    display_cols.append("ORARIO_STR")
+                display_cols += ["n", "LIQUIDO tot [ml]", "CARBO tot [g]", "SODIO tot [mg]", "CALORIE tot [kcal]", "note"]
+
+                st.markdown("**Dettaglio per prodotto**")
+                st.dataframe(
+                    rows[display_cols].rename(columns={"ORARIO_STR": "ORARIO"}).style.format(
+                        {
+                            "n": "{:.2f}",
+                            "LIQUIDO tot [ml]": "{:.0f}",
+                            "CARBO tot [g]": "{:.1f}",
+                            "SODIO tot [mg]": "{:.0f}",
+                            "CALORIE tot [kcal]": "{:.0f}",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.markdown("### Totali generali")
+            render_summary(totals, hours)
+
+            if not rows.empty:
+                st.markdown("**Totale per prodotto (tutte le sezioni)**")
+                st.dataframe(
+                    totale_per_prodotto(rows).style.format(
+                        {
+                            "n": "{:.2f}",
+                            "LIQUIDO tot [ml]": "{:.0f}",
+                            "CARBO tot [g]": "{:.1f}",
+                            "SODIO tot [mg]": "{:.0f}",
+                            "CALORIE tot [kcal]": "{:.0f}",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # ------------------------------------------------------- Distribuzione oraria
+        with tab_hourly:
+            if not time_dist:
+                st.info(
+                    "Attiva \"Vuoi analizzare la distribuzione nel tempo?\" in cima al tab per vedere "
+                    "il confronto ora per ora con i tassi orari consigliati."
+                )
+            else:
+                total_minutes = int(round(hours * 60))
+                if total_minutes <= 0:
+                    st.info("Imposta una durata gara valida (Piano gara o campo Ore corsa) per l'analisi oraria.")
+                else:
+                    buckets = hourly_buckets(total_minutes)
+
+                    def style_rate_col(col: pd.Series, target_key: str) -> list:
+                        tmin = st.session_state.targets["min"][target_key]
+                        tmax = st.session_state.targets["max"][target_key]
+                        styles = []
+                        for v in col:
+                            if pd.isna(v):
+                                styles.append("")
+                            elif v < tmin or v > tmax:
+                                styles.append("background-color: #ffd2d2; color: #7a0000;")
+                            else:
+                                styles.append("background-color: #d7f5d0; color: #175c17;")
+                        return styles
+
+                    records = []
+                    for i, b in enumerate(buckets):
+                        is_first = i == 0
+                        if not rows.empty:
+                            # ogni fascia è (inizio, fine]: un orario esatto (es. 1:00) appartiene
+                            # alla fascia che si conclude in quel momento, non a quella successiva.
+                            # La primissima fascia include anche l'istante di partenza (0:00).
+                            if is_first:
+                                mask = (rows["ORARIO_MIN"] >= b["start"]) & (rows["ORARIO_MIN"] <= b["end"])
+                            else:
+                                mask = (rows["ORARIO_MIN"] > b["start"]) & (rows["ORARIO_MIN"] <= b["end"])
+                            bucket_rows = rows[mask]
+                            liquido = bucket_rows["LIQUIDO tot [ml]"].sum()
+                            carbo = bucket_rows["CARBO tot [g]"].sum()
+                            sodio_tot = bucket_rows["SODIO tot [mg]"].sum()
+                            calorie = bucket_rows["CALORIE tot [kcal]"].sum()
+                        else:
+                            liquido = carbo = sodio_tot = calorie = 0.0
+                        bucket_hours = b["durata_min"] / 60.0
+                        records.append(
+                            {
+                                "Fascia": (
+                                    f"{minutes_to_hhmm(b['start'])} → {minutes_to_hhmm(b['end'])}"
+                                ),
+                                "Liquido [ml/h]": liquido / bucket_hours if bucket_hours > 0 else float("nan"),
+                                "Carbo [g/h]": carbo / bucket_hours if bucket_hours > 0 else float("nan"),
+                                "Sodio [mg/l]": (sodio_tot / liquido * 1000) if liquido > 0 else float("nan"),
+                                "Calorie [kcal/h]": calorie / bucket_hours if bucket_hours > 0 else float("nan"),
+                            }
+                        )
+                    hourly_df = pd.DataFrame(records)
+                    numeric_cols = ["Liquido [ml/h]", "Carbo [g/h]", "Sodio [mg/l]", "Calorie [kcal/h]"]
+                    hourly_df[numeric_cols] = hourly_df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+
+                    st.caption(
+                        "🟢 verde = nel range dell'obiettivo · 🔴 rosso = fuori dal range "
+                        "(min/max modificabili nel tab Totali)."
                     )
 
-                for i, b in enumerate(buckets):
-                    is_first = i == 0
-                    if not rows.empty:
-                        # ogni fascia è (inizio, fine]: un orario esatto (es. 1:00) appartiene
-                        # alla fascia che si conclude in quel momento, non a quella successiva.
-                        # La primissima fascia include anche l'istante di partenza (0:00).
-                        if is_first:
-                            mask = (rows["ORARIO_MIN"] >= b["start"]) & (rows["ORARIO_MIN"] <= b["end"])
-                        else:
-                            mask = (rows["ORARIO_MIN"] > b["start"]) & (rows["ORARIO_MIN"] <= b["end"])
-                        bucket_rows = rows[mask]
-                        bucket_totals = {
-                            "LIQUIDO [ml]": bucket_rows["LIQUIDO tot [ml]"].sum(),
-                            "g CARBO": bucket_rows["CARBO tot [g]"].sum(),
-                            "SODIO [mg]": bucket_rows["SODIO tot [mg]"].sum(),
-                            "CALORIE [kcal]": bucket_rows["CALORIE tot [kcal]"].sum(),
-                        }
-                    else:
-                        bucket_totals = {"LIQUIDO [ml]": 0.0, "g CARBO": 0.0, "SODIO [mg]": 0.0, "CALORIE [kcal]": 0.0}
-                    bucket_hours = b["durata_min"] / 60.0
-
-                    with st.container(border=True):
-                        st.markdown(
-                            f"**{minutes_to_hhmm(b['start'])} → {minutes_to_hhmm(b['end'])}** "
-                            f"&nbsp;({minutes_to_hhmm(b['durata_min'])})"
+                    # A column that is entirely NaN (e.g. sodium when no liquid was ever taken)
+                    # renders as the literal text "None" in Streamlit's dataframe grid instead of
+                    # respecting the Styler's format function — so build a text column with the
+                    # formatted/placeholder strings up front, and color it using the original
+                    # numeric values (captured separately) rather than relying on na_rep/.format().
+                    decimals_by_col = {
+                        "Liquido [ml/h]": 0,
+                        "Carbo [g/h]": 1,
+                        "Sodio [mg/l]": 0,
+                        "Calorie [kcal/h]": 0,
+                    }
+                    display_df = hourly_df.copy()
+                    for col, decimals in decimals_by_col.items():
+                        display_df[col] = hourly_df[col].apply(
+                            lambda v, d=decimals: "—" if pd.isna(v) else f"{v:.{d}f}"
                         )
-                        render_summary(bucket_totals, bucket_hours)
+
+                    styled = display_df.style
+                    for col_label, target_key in [
+                        ("Liquido [ml/h]", "LIQUIDO [ml/h]"),
+                        ("Carbo [g/h]", "CARBO [g/h]"),
+                        ("Sodio [mg/l]", "SODIO [mg/l]"),
+                        ("Calorie [kcal/h]", "CALORIE [kcal/h]"),
+                    ]:
+                        numeric_vals = hourly_df[col_label]
+                        styled = styled.apply(
+                            lambda _col, vals=numeric_vals, k=target_key: style_rate_col(vals, k),
+                            subset=[col_label],
+                        )
+                    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+                    fuori_gara = rows[rows["ORARIO_MIN"] > total_minutes] if not rows.empty else rows
+                    if not rows.empty and len(fuori_gara) > 0:
+                        nomi = ", ".join(sorted(set(fuori_gara["PRODOTTO"].tolist())))
+                        st.warning(
+                            f"{len(fuori_gara)} riga/righe hanno un orario oltre la durata totale della gara "
+                            f"({minutes_to_hhmm(total_minutes)}) e non compaiono qui sopra: {nomi}."
+                        )
